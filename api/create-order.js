@@ -34,7 +34,14 @@ module.exports = async (req, res) => {
         res.status(500).json({
             error: "Unable to create order",
             message: error.message,
-            razorpay_error: error
+            razorpay_error: error,
+            debug_info: {
+                has_id: !!process.env.RAZORPAY_KEY_ID,
+                has_secret: !!process.env.RAZORPAY_KEY_SECRET,
+                id_length: process.env.RAZORPAY_KEY_ID ? process.env.RAZORPAY_KEY_ID.length : 0,
+                secret_length: process.env.RAZORPAY_KEY_SECRET ? process.env.RAZORPAY_KEY_SECRET.length : 0,
+                id_prefix: process.env.RAZORPAY_KEY_ID ? process.env.RAZORPAY_KEY_ID.substring(0, 10) : "none"
+            }
         });
     }
 };
