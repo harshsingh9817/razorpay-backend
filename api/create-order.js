@@ -1,11 +1,15 @@
 const Razorpay = require("razorpay");
 
-const razorpay = new Razorpay({
-    key_id: (process.env.RAZORPAY_KEY_ID || "").trim(),
-    key_secret: (process.env.RAZORPAY_KEY_SECRET || "").trim(),
-});
-
 module.exports = async (req, res) => {
+    // Initialize inside handler to ensure fresh environment variables
+    const key_id = (process.env.RAZORPAY_KEY_ID || "").trim();
+    const key_secret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
+
+    const razorpay = new Razorpay({
+        key_id: key_id,
+        key_secret: key_secret,
+    });
+
     if (req.method !== "POST") {
         return res.status(405).json({ error: "Method not allowed" });
     }
@@ -27,7 +31,7 @@ module.exports = async (req, res) => {
             order_id: order.id,
             amount: order.amount,
             currency: order.currency,
-            key_id: process.env.RAZORPAY_KEY_ID,
+            key_id: key_id,
         });
     } catch (error) {
         console.error("Razorpay Order Creation Error:", error);
@@ -36,11 +40,12 @@ module.exports = async (req, res) => {
             message: error.message,
             razorpay_error: error,
             debug_info: {
-                has_id: !!process.env.RAZORPAY_KEY_ID,
-                has_secret: !!process.env.RAZORPAY_KEY_SECRET,
-                id_length: process.env.RAZORPAY_KEY_ID ? process.env.RAZORPAY_KEY_ID.length : 0,
-                secret_length: process.env.RAZORPAY_KEY_SECRET ? process.env.RAZORPAY_KEY_SECRET.length : 0,
-                id_prefix: process.env.RAZORPAY_KEY_ID ? process.env.RAZORPAY_KEY_ID.substring(0, 10) : "none"
+                has_id: !!key_id,
+                has_secret: !!key_secret,
+                id_length: key_id.length,
+                secret_length: key_secret.length,
+                id_prefix: key_id.substring(0, 10),
+                env_type: process.env.VERCEL_ENV || "unknown"
             }
         });
     }
