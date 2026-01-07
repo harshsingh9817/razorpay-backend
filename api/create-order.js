@@ -1,20 +1,24 @@
-const Razorpay = require("razorpay");
-
 module.exports = async (req, res) => {
-    // Initialize inside handler to ensure fresh environment variables
-    const key_id = (process.env.RAZORPAY_KEY_ID || "").trim();
-    const key_secret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
+    if (req.method !== "POST") {
+        return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const { amount, currency = "INR", receipt, mode = "test" } = req.body;
+
+    // Dynamically select keys based on mode
+    let key_id, key_secret;
+    if (mode === "live") {
+        key_id = (process.env.RAZORPAY_KEY_ID_LIVE || "").trim();
+        key_secret = (process.env.RAZORPAY_KEY_SECRET_LIVE || "").trim();
+    } else {
+        key_id = (process.env.RAZORPAY_KEY_ID_TEST || "").trim();
+        key_secret = (process.env.RAZORPAY_KEY_SECRET_TEST || "").trim();
+    }
 
     const razorpay = new Razorpay({
         key_id: key_id,
         key_secret: key_secret,
     });
-
-    if (req.method !== "POST") {
-        return res.status(405).json({ error: "Method not allowed" });
-    }
-
-    const { amount, currency = "INR", receipt } = req.body;
 
     if (!amount) {
         return res.status(400).json({ error: "Amount is required" });
@@ -45,6 +49,7 @@ module.exports = async (req, res) => {
                 id_length: key_id.length,
                 secret_length: key_secret.length,
                 id_prefix: key_id.substring(0, 10),
+                mode: mode,
                 env_type: process.env.VERCEL_ENV || "unknown"
             }
         });

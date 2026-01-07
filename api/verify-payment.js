@@ -5,8 +5,14 @@ module.exports = async (req, res) => {
         return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const { orderId, paymentId, signature } = req.body;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    const { orderId, paymentId, signature, mode = "test" } = req.body;
+
+    let keySecret;
+    if (mode === "live") {
+        keySecret = (process.env.RAZORPAY_KEY_SECRET_LIVE || "").trim();
+    } else {
+        keySecret = (process.env.RAZORPAY_KEY_SECRET_TEST || "").trim();
+    }
 
     if (!orderId || !paymentId || !signature) {
         return res.status(400).json({ error: "Missing required parameters" });
