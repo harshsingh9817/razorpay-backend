@@ -1,8 +1,16 @@
 {
-    "name": "rasoi-backend",
-    "version": "1.0.0",
-    "private": true,
-    "dependencies": {
-        "razorpay": "^2.9.2"
-    }
+  "name": "rasoi-backend",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "firebase-admin": "^12.7.0",
+    "razorpay": "^2.9.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
