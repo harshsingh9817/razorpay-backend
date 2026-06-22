@@ -3,22 +3,47 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
 
-// ─── Firebase Admin Init ───────────────────────────────────────────
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-const db = admin.firestore();
+// ─── Firebase Admin Init (graceful) ────────────────────────────────
+let db = null;
+let firebaseReady = false;
+try {
+  const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT || "";
+  if (rawServiceAccount && rawServiceAccount !== "{}") {
+    const serviceAccount = JSON.parse(rawServiceAccount);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    db = admin.firestore();
+    firebaseReady = true;
+    console.log("✅ Firebase Admin initialized successfully");
+  } else {
+    console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT not set — Firebase features disabled");
+  }
+} catch (err) {
+  console.error("❌ Firebase init failed:", err.message);
+}
 
-// ─── Razorpay Init ─────────────────────────────────────────────────
+// ─── Razorpay Init (graceful) ──────────────────────────────────────
+let razorpay = null;
+let razorpayReady = false;
 const razorpayKeyId = (process.env.RAZORPAY_KEY_ID || "").trim();
 const razorpayKeySecret = (process.env.RAZORPAY_KEY_SECRET || "").trim();
 const webhookSecret = (process.env.RAZORPAY_WEBHOOK_SECRET || "").trim();
 
-const razorpay = new Razorpay({
-  key_id: razorpayKeyId,
-  key_secret: razorpayKeySecret,
-});
+try {
+  if (razorpayKeyId && razorpayKeySecret) {
+    razorpay = new Razorpay({
+      key_id: razorpayKeyId,
+      key_secret: razorpayKeySecret,
+    });
+    razorpayReady = true;
+    console.log("✅ Razorpay initialized successfully");
+  } else {
+    console.warn("⚠️ RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set — Razorpay features disabled");
+  }
+} catch (err) {
+  console.error("❌ Razorpay init failed:", err.message);
+}
 
 // ─── Express App ───────────────────────────────────────────────────
 const app = express();
@@ -33,6 +58,11 @@ app.get("/api/health", (req, res) => {
     status: "ok",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
+    services: {
+      firebase: firebaseReady ? "connected" : "not configured",
+      razorpay: razorpayReady ? "connected" : "not configured",
+      webhook: webhookSecret ? "configured" : "not configured",
+    },
   });
 });
 
@@ -205,6 +235,12 @@ app.get("/", (req, res) => {
         Server Online
       </div>
 
+      <div style="display:flex;gap:8px;justify-content:center;margin-bottom:24px;flex-wrap:wrap">
+        <span style="padding:6px 14px;border-radius:100px;font-size:12px;font-weight:600;${firebaseReady ? 'background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.2)'}">${firebaseReady ? '✅' : '❌'} Firebase</span>
+        <span style="padding:6px 14px;border-radius:100px;font-size:12px;font-weight:600;${razorpayReady ? 'background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.2)'}">${razorpayReady ? '✅' : '❌'} Razorpay</span>
+        <span style="padding:6px 14px;border-radius:100px;font-size:12px;font-weight:600;${webhookSecret ? 'background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.2)'}">${webhookSecret ? '✅' : '❌'} Webhook</span>
+      </div>
+
       <div class="stats">
         <div class="stat">
           <div class="stat-value" id="uptime">${uptimeStr}</div>
@@ -287,6 +323,10 @@ app.get("/", (req, res) => {
 // ─── Create Order ──────────────────────────────────────────────────
 app.post("/api/create-order", async (req, res) => {
   try {
+    if (!firebaseReady || !razorpayReady) {
+      return res.status(503).json({ error: "Server not fully configured. Missing Firebase or Razorpay credentials." });
+    }
+
     const { amount, firestoreOrderId } = req.body;
 
     if (!amount || !firestoreOrderId) {
@@ -323,6 +363,11 @@ app.post("/api/create-order", async (req, res) => {
 // ─── Razorpay Webhook ──────────────────────────────────────────────
 app.post("/api/razorpay-webhook", async (req, res) => {
   try {
+    if (!firebaseReady) {
+      console.error("❌ Webhook received but Firebase not configured");
+      return res.status(200).json({ status: "ok", warning: "Firebase not configured" });
+    }
+
     const rawBody = req.body.toString("utf8");
     const receivedSignature = req.headers["x-razorpay-signature"];
 
