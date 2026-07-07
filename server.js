@@ -3,6 +3,40 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
 
+// ─── In-Memory Logger ──────────────────────────────────────────────
+const MAX_LOGS = 500;
+const logsArray = [];
+const originalLog = console.log;
+const originalWarn = console.warn;
+const originalError = console.error;
+
+function formatArgs(args) {
+  return Array.from(args).map(arg => {
+    if (arg instanceof Error) return arg.stack;
+    if (typeof arg === 'object') return JSON.stringify(arg);
+    return arg;
+  }).join(' ');
+}
+
+console.log = function() {
+  const msg = formatArgs(arguments);
+  logsArray.unshift({ type: 'log', time: new Date().toISOString(), msg });
+  if (logsArray.length > MAX_LOGS) logsArray.pop();
+  originalLog.apply(console, arguments);
+};
+console.warn = function() {
+  const msg = formatArgs(arguments);
+  logsArray.unshift({ type: 'warn', time: new Date().toISOString(), msg });
+  if (logsArray.length > MAX_LOGS) logsArray.pop();
+  originalWarn.apply(console, arguments);
+};
+console.error = function() {
+  const msg = formatArgs(arguments);
+  logsArray.unshift({ type: 'error', time: new Date().toISOString(), msg });
+  if (logsArray.length > MAX_LOGS) logsArray.pop();
+  originalError.apply(console, arguments);
+};
+
 // ─── Firebase Admin Init (graceful) ────────────────────────────────
 let db = null;
 let firebaseReady = false;
@@ -48,6 +82,14 @@ try {
 // ─── Express App ───────────────────────────────────────────────────
 const app = express();
 
+// Global request logger middleware
+app.use((req, res, next) => {
+  console.log(`\n======================================================`);
+  console.log(`🌐 [Network] ${req.method} ${req.url}`);
+  console.log(`🌐 [Network] Headers:`, JSON.stringify(req.headers));
+  next();
+});
+
 // Webhook needs raw body for signature verification
 app.use("/api/razorpay-webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
@@ -64,6 +106,60 @@ app.get("/api/health", (req, res) => {
       webhook: webhookSecret ? "configured" : "not configured",
     },
   });
+});
+
+// ─── Logs Dashboard (Web Page) ──────────────────────────────────────
+app.get("/logs", (req, res) => {
+  let html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Rasoi Xpress — Server Logs</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        body { background: #0a0a0a; color: #fff; font-family: monospace; padding: 20px; margin: 0; }
+        h2 { font-family: sans-serif; margin-top: 0; color: #ff9800; }
+        .log { color: #a3e635; }
+        .warn { color: #facc15; }
+        .error { color: #f87171; }
+        .time { color: #9ca3af; margin-right: 12px; }
+        .log-entry { white-space: pre-wrap; word-wrap: break-word; margin: 0; padding: 8px 4px; border-bottom: 1px solid #222; }
+        .log-entry:hover { background: #1a1a1a; }
+        .controls { margin-bottom: 20px; font-family: sans-serif; display: flex; gap: 16px; align-items: center; }
+        button { background: #ff5722; color: white; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+        button:hover { background: #f4511e; }
+      </style>
+      <script>
+        let timer = setInterval(() => window.location.reload(), 3000);
+        function toggleRefresh(cb) {
+          if (cb.checked) {
+            timer = setInterval(() => window.location.reload(), 3000);
+            document.getElementById('status').innerText = 'Auto-refresh: ON (3s)';
+          } else {
+            clearInterval(timer);
+            document.getElementById('status').innerText = 'Auto-refresh: OFF';
+          }
+        }
+      </script>
+    </head>
+    <body>
+      <h2>Server Logs (Last ${logsArray.length})</h2>
+      <div class="controls">
+        <label><input type="checkbox" checked onchange="toggleRefresh(this)"> Enable Auto-refresh</label>
+        <span id="status" style="color:#9ca3af; font-size:14px;">Auto-refresh: ON (3s)</span>
+        <button onclick="window.location.reload()">Manual Refresh</button>
+        <a href="/" style="color:#ff9800; text-decoration:none; margin-left:auto;">← Back to Status</a>
+      </div>
+      <div style="background: #000; border-radius: 8px; border: 1px solid #333; overflow: hidden; padding: 10px;">
+  `;
+  if (logsArray.length === 0) {
+    html += `<div style="color: #666; padding: 20px; text-align: center;">No logs yet.</div>`;
+  }
+  for (let l of logsArray) {
+    html += `<div class="log-entry ${l.type}"><span class="time">[${l.time}]</span>${l.msg}</div>`;
+  }
+  html += `</div></body></html>`;
+  res.send(html);
 });
 
 // ─── Status Dashboard (Web Page) ───────────────────────────────────
@@ -323,52 +419,73 @@ app.get("/", (req, res) => {
 // ─── Create Order ──────────────────────────────────────────────────
 app.post("/api/create-order", async (req, res) => {
   try {
+    console.log(`\n======================================================`);
+    console.log(`👉 [Server] POST /api/create-order received`);
+    console.log(`👉 [Server] Request body:`, JSON.stringify(req.body, null, 2));
+
     if (!firebaseReady || !razorpayReady) {
+      console.warn(`⚠️ [Server] Server not fully configured. FirebaseReady=${firebaseReady}, RazorpayReady=${razorpayReady}`);
       return res.status(503).json({ error: "Server not fully configured. Missing Firebase or Razorpay credentials." });
     }
 
     const { amount, firestoreOrderId } = req.body;
 
     if (!amount || !firestoreOrderId) {
+      console.warn(`⚠️ [Server] Missing required fields: amount=${amount}, firestoreOrderId=${firestoreOrderId}`);
       return res.status(400).json({ error: "amount and firestoreOrderId are required" });
     }
 
-    // Create Razorpay order
-    const order = await razorpay.orders.create({
+    const razorpayPayload = {
       amount: Math.round(amount * 100), // Convert to paise
       currency: "INR",
       receipt: firestoreOrderId,
       notes: {
         firestoreOrderId: firestoreOrderId,
       },
-    });
+    };
+    
+    console.log(`👉 [Server] Calling razorpay.orders.create with payload:`, JSON.stringify(razorpayPayload, null, 2));
 
+    // Create Razorpay order
+    const order = await razorpay.orders.create(razorpayPayload);
+    
+    console.log(`✅ [Server] Razorpay order created successfully:`, JSON.stringify(order, null, 2));
+
+    console.log(`👉 [Server] Updating Firestore order ${firestoreOrderId} with razorpayOrderId: ${order.id}`);
     // Store the razorpayOrderId in Firestore so webhook can map it back
     await db.collection("orders").doc(firestoreOrderId).update({
       razorpayOrderId: order.id,
     });
+    console.log(`✅ [Server] Firestore updated successfully.`);
 
-    res.status(200).json({
+    const responsePayload = {
       razorpayOrderId: order.id,
       keyId: razorpayKeyId,
       amount: order.amount,
       currency: order.currency,
-    });
+    };
+    console.log(`👉 [Server] Sending response back to client:`, JSON.stringify(responsePayload, null, 2));
+    
+    res.status(200).json(responsePayload);
   } catch (error) {
-    console.error("❌ Create Order Error:", error);
+    console.error("❌ [Server] Create Order Error:", error);
     res.status(500).json({ error: "Failed to create order", message: error.message });
   }
 });
 
 // ─── Razorpay Webhook ──────────────────────────────────────────────
 app.post("/api/razorpay-webhook", async (req, res) => {
+  console.log(`\n======================================================`);
+  console.log(`👉 [Webhook] Received incoming webhook request`);
+  console.log(`👉 [Webhook] Headers:`, JSON.stringify(req.headers, null, 2));
   try {
     if (!firebaseReady) {
-      console.error("❌ Webhook received but Firebase not configured");
+      console.error("❌ [Webhook] Webhook received but Firebase not configured");
       return res.status(200).json({ status: "ok", warning: "Firebase not configured" });
     }
 
     const rawBody = req.body.toString("utf8");
+    console.log(`👉 [Webhook] Raw Body (truncated):`, rawBody.substring(0, 500) + '...');
     const receivedSignature = req.headers["x-razorpay-signature"];
 
     // Verify webhook signature
@@ -377,20 +494,27 @@ app.post("/api/razorpay-webhook", async (req, res) => {
       .update(rawBody)
       .digest("hex");
 
+    console.log(`👉 [Webhook] Expected Signature: ${expectedSignature} | Received: ${receivedSignature}`);
+
     if (expectedSignature !== receivedSignature) {
-      console.error("❌ Webhook signature mismatch");
+      console.error("❌ [Webhook] Webhook signature mismatch");
       return res.status(400).json({ error: "Invalid signature" });
     }
+    console.log(`✅ [Webhook] Signature verified successfully.`);
 
     const event = JSON.parse(rawBody);
     const eventType = event.event;
 
-    console.log(`📩 Webhook received: ${eventType}`);
+    console.log(`📩 [Webhook] Event type: ${eventType}`);
+    console.log(`👉 [Webhook] Full Event Payload:`, JSON.stringify(event, null, 2));
 
     if (eventType === "payment.captured") {
       const payment = event.payload.payment.entity;
       const razorpayOrderId = payment.order_id;
       const razorpayPaymentId = payment.id;
+      
+      console.log(`👉 [Webhook] Processing payment.captured for Razorpay Order: ${razorpayOrderId}, Payment ID: ${razorpayPaymentId}`);
+      console.log(`👉 [Webhook] Querying Firestore for order with razorpayOrderId == ${razorpayOrderId}`);
 
       // Find the Firestore order by razorpayOrderId
       const ordersSnapshot = await db
@@ -400,9 +524,11 @@ app.post("/api/razorpay-webhook", async (req, res) => {
         .get();
 
       if (ordersSnapshot.empty) {
+        console.log(`⚠️ [Webhook] No order found by razorpayOrderId. Checking notes fallback...`);
         // Fallback: check receipt in notes
         const firestoreOrderId = event.payload.payment.entity.notes?.firestoreOrderId;
         if (firestoreOrderId) {
+          console.log(`👉 [Webhook] Found firestoreOrderId in notes: ${firestoreOrderId}. Updating Firestore...`);
           await db.collection("orders").doc(firestoreOrderId).update({
             status: "Order Placed",
             razorpayPaymentId: razorpayPaymentId,
@@ -410,23 +536,27 @@ app.post("/api/razorpay-webhook", async (req, res) => {
             paymentVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
             paymentVerifiedBy: "webhook",
           });
-          console.log(`✅ Order ${firestoreOrderId} updated via notes fallback`);
+          console.log(`✅ [Webhook] Order ${firestoreOrderId} updated via notes fallback`);
         } else {
-          console.error(`❌ No Firestore order found for Razorpay order: ${razorpayOrderId}`);
+          console.error(`❌ [Webhook] No Firestore order found for Razorpay order: ${razorpayOrderId}, and no fallback ID found.`);
         }
       } else {
         const orderDoc = ordersSnapshot.docs[0];
+        console.log(`✅ [Webhook] Found Firestore order: ${orderDoc.id}. Updating status to "Order Placed"...`);
         await orderDoc.ref.update({
           status: "Order Placed",
           razorpayPaymentId: razorpayPaymentId,
           paymentVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
           paymentVerifiedBy: "webhook",
         });
-        console.log(`✅ Order ${orderDoc.id} marked as "Order Placed"`);
+        console.log(`✅ [Webhook] Order ${orderDoc.id} marked as "Order Placed"`);
       }
     } else if (eventType === "payment.failed") {
       const payment = event.payload.payment.entity;
       const razorpayOrderId = payment.order_id;
+      
+      console.log(`👉 [Webhook] Processing payment.failed for Razorpay Order: ${razorpayOrderId}`);
+      console.log(`👉 [Webhook] Querying Firestore for order with razorpayOrderId == ${razorpayOrderId}`);
 
       const ordersSnapshot = await db
         .collection("orders")
@@ -437,22 +567,29 @@ app.post("/api/razorpay-webhook", async (req, res) => {
       if (!ordersSnapshot.empty) {
         const orderDoc = ordersSnapshot.docs[0];
         const currentStatus = orderDoc.data().status;
+        console.log(`👉 [Webhook] Found Firestore order: ${orderDoc.id}. Current status: ${currentStatus}`);
         // Don't override if already "Order Placed" (payment was captured before failure event)
         if (currentStatus !== "Order Placed") {
+          console.log(`👉 [Webhook] Updating status to "Payment Failed"...`);
           await orderDoc.ref.update({
             status: "Payment Failed",
             paymentFailedAt: admin.firestore.FieldValue.serverTimestamp(),
             razorpayErrorDescription: payment.error_description || "Payment failed",
           });
-          console.log(`❌ Order ${orderDoc.id} marked as "Payment Failed"`);
+          console.log(`❌ [Webhook] Order ${orderDoc.id} marked as "Payment Failed"`);
+        } else {
+           console.log(`👉 [Webhook] Order ${orderDoc.id} is already "Order Placed", ignoring failure event.`);
         }
+      } else {
+         console.warn(`⚠️ [Webhook] No Firestore order found for failed payment Razorpay order: ${razorpayOrderId}`);
       }
     }
 
     // Always respond 200 to Razorpay (they retry on non-2xx)
+    console.log(`👉 [Webhook] Sending 200 OK response to Razorpay`);
     res.status(200).json({ status: "ok" });
   } catch (error) {
-    console.error("❌ Webhook processing error:", error);
+    console.error("❌ [Webhook] Webhook processing error:", error);
     // Still respond 200 to prevent retries on processing errors
     res.status(200).json({ status: "ok" });
   }
