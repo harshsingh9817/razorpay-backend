@@ -359,7 +359,15 @@ app.get("/", (req, res) => {
       <button class="ping-btn" id="pingBtn" onclick="doPing()">🏓 Ping Server</button>
       <div class="ping-result" id="pingResult">Click the button to ping</div>
 
-      <div class="footer">Keep-alive pings every 14 min · Powered by Node.js + Express</div>
+      <!-- Firebase Test Section -->
+      <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,0.1);">
+        <div class="title" style="font-size: 18px; margin-bottom: 12px;">Test Firebase Write</div>
+        <input type="text" id="testOrderId" placeholder="Enter Firestore Document ID" style="width: 100%; padding: 12px; border-radius: 8px; border: none; margin-bottom: 12px; background: rgba(255,255,255,0.1); color: white; font-family: monospace;">
+        <button class="ping-btn" id="testBtn" onclick="testFirebase()" style="background: linear-gradient(135deg, #3b82f6, #2563eb);">Update to "Order Placed"</button>
+        <div class="ping-result" id="testResult">Enter an Order ID to test server write access</div>
+      </div>
+
+      <div class="footer" style="margin-top: 32px;">Keep-alive pings every 14 min · Powered by Node.js + Express</div>
     </div>
   </div>
 
@@ -411,9 +419,86 @@ app.get("/", (req, res) => {
       const s = Math.floor(serverUptime % 60);
       document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
     }, 1000);
+
+    async function testFirebase() {
+      const docId = document.getElementById('testOrderId').value.trim();
+      const btn = document.getElementById('testBtn');
+      const result = document.getElementById('testResult');
+      
+      if (!docId) {
+        result.className = 'ping-result ping-fail';
+        result.textContent = '❌ Please enter a Document ID first!';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Updating...';
+      result.className = 'ping-result';
+      result.textContent = 'Sending request to server...';
+
+      try {
+        const res = await fetch('/api/test-firebase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId: docId })
+        });
+        const data = await res.json();
+        
+        if (res.ok) {
+          result.className = 'ping-result ping-ok';
+          result.textContent = '✅ Success! Server updated Firebase document.';
+        } else {
+          result.className = 'ping-result ping-fail';
+          result.textContent = '❌ Failed: ' + (data.error || 'Unknown error');
+        }
+      } catch (err) {
+        result.className = 'ping-result ping-fail';
+        result.textContent = '❌ Network error: ' + err.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Update to "Order Placed"';
+    }
   </script>
 </body>
 </html>`);
+});
+
+// ─── Firebase Write Test Endpoint ──────────────────────────────────
+app.post("/api/test-firebase", async (req, res) => {
+  try {
+    const { orderId } = req.body;
+    if (!orderId) {
+      return res.status(400).json({ error: "orderId is required" });
+    }
+    
+    if (!firebaseReady) {
+      return res.status(503).json({ error: "Firebase is not initialized on the server" });
+    }
+
+    console.log(`\n======================================================`);
+    console.log(`👉 [Test] Attempting to update order ${orderId} to 'Order Placed'`);
+    
+    // Check if document exists first
+    const docRef = db.collection("orders").doc(orderId);
+    const docSnap = await docRef.get();
+    
+    if (!docSnap.exists) {
+      console.error(`❌ [Test] Order document ${orderId} does not exist in Firebase!`);
+      return res.status(404).json({ error: `Document ${orderId} not found in 'orders' collection.` });
+    }
+
+    await docRef.update({
+      status: "Order Placed",
+      paymentVerifiedBy: "server_manual_test",
+      paymentVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    
+    console.log(`✅ [Test] Successfully updated order ${orderId} to 'Order Placed'!`);
+    res.status(200).json({ success: true, message: "Order updated successfully" });
+  } catch (error) {
+    console.error(`❌ [Test] Firebase update failed:`, error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ─── Create Order ──────────────────────────────────────────────────
