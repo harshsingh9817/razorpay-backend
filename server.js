@@ -2,6 +2,10 @@ const express = require("express");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
+const multer = require("multer");
+const FormData = require("form-data");
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 // ─── In-Memory Logger ──────────────────────────────────────────────
 const MAX_LOGS = 500;
@@ -717,6 +721,61 @@ app.post("/api/razorpay-webhook", async (req, res) => {
     console.error("❌ [Webhook] Webhook processing error:", error);
     // Still respond 200 to prevent retries on processing errors
     res.status(200).json({ status: "ok" });
+  }
+});
+
+// ─── Admin Image Proxy Upload ──────────────────────────────────────
+app.post("/api/admin/upload-image", upload.single('file'), async (req, res) => {
+  try {
+    const { uid } = req.body;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    // Verify Admin Status
+    const userDoc = await db.collection("users").doc(uid).get();
+    if (!userDoc.exists || userDoc.data().role !== "admin") {
+      return res.status(403).json({ error: "Access denied. Admin role required." });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    console.log(`\n======================================================`);
+    console.log(`👉 [Admin] Proxy uploading image for user ${uid}`);
+
+    // Create form-data to send to image server
+    const form = new FormData();
+    form.append('file', req.file.buffer, {
+      filename: req.file.originalname || 'upload.jpg',
+      contentType: req.file.mimetype || 'image/jpeg'
+    });
+    form.append('webId', 'web_1783332684307');
+
+    form.submit({
+      host: 'shiv-shakti-image-server.onrender.com',
+      path: '/api/upload',
+      protocol: 'https:',
+      headers: {
+        'Authorization': 'admin-auth-token-xyz'
+      }
+    }, function(err, response) {
+      if (err) {
+        console.error("❌ [Admin] Image proxy upload failed:", err);
+        return res.status(500).json({ error: err.message });
+      }
+      
+      let body = '';
+      response.on('data', chunk => body += chunk.toString());
+      response.on('end', () => {
+        console.log(`✅ [Admin] Image proxy upload completed with status ${response.statusCode}`);
+        res.status(response.statusCode).send(body);
+      });
+    });
+  } catch (error) {
+    console.error("❌ [Admin] Proxy upload error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
