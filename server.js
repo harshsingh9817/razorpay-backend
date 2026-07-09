@@ -593,6 +593,26 @@ app.post("/api/razorpay-webhook", async (req, res) => {
     console.log(`📩 [Webhook] Event type: ${eventType}`);
     console.log(`👉 [Webhook] Full Event Payload:`, JSON.stringify(event, null, 2));
 
+    // Send Push Notification Helper
+    const sendOrderPush = async (userId, title, body, route) => {
+      try {
+        const userDoc = await db.collection("users").doc(userId).get();
+        if (userDoc.exists) {
+          const token = userDoc.data().fcmToken;
+          if (token) {
+            await admin.messaging().send({
+              token: token,
+              notification: { title, body },
+              data: { route: route || 'orders' },
+            });
+            console.log(`✅ [Webhook] Sent push notification to ${userId}: ${title}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`⚠️ [Webhook] Failed to send push notification to ${userId}:`, err.message);
+      }
+    };
+
     if (eventType === "payment.captured") {
       const payment = event.payload.payment.entity;
       const razorpayOrderId = payment.order_id;
@@ -622,6 +642,11 @@ app.post("/api/razorpay-webhook", async (req, res) => {
             paymentVerifiedBy: "webhook",
           });
           console.log(`✅ [Webhook] Order ${firestoreOrderId} updated via notes fallback`);
+          
+          const orderDoc2 = await db.collection("orders").doc(firestoreOrderId).get();
+          if (orderDoc2.exists) {
+             sendOrderPush(orderDoc2.data().userId, "🎉 Order Placed Successfully!", "Your delicious meal is being prepared.", "orders");
+          }
         } else {
           console.error(`❌ [Webhook] No Firestore order found for Razorpay order: ${razorpayOrderId}, and no fallback ID found.`);
         }
@@ -635,6 +660,7 @@ app.post("/api/razorpay-webhook", async (req, res) => {
           paymentVerifiedBy: "webhook",
         });
         console.log(`✅ [Webhook] Order ${orderDoc.id} marked as "Order Placed"`);
+        sendOrderPush(orderDoc.data().userId, "🎉 Order Placed Successfully!", "Your delicious meal is being prepared.", "orders");
       }
     } else if (eventType === "payment.failed") {
       const payment = event.payload.payment.entity;
@@ -662,6 +688,7 @@ app.post("/api/razorpay-webhook", async (req, res) => {
             razorpayErrorDescription: payment.error_description || "Payment failed",
           });
           console.log(`❌ [Webhook] Order ${orderDoc.id} marked as "Payment Failed"`);
+          sendOrderPush(orderDoc.data().userId, "❌ Payment Failed", "Your order was not placed. Please try again.", "orders");
         } else {
            console.log(`👉 [Webhook] Order ${orderDoc.id} is already "Order Placed", ignoring failure event.`);
         }
@@ -683,7 +710,7 @@ app.post("/api/razorpay-webhook", async (req, res) => {
 // ─── Admin Promotional Messaging ───────────────────────────────────
 app.post("/api/send-promotion", async (req, res) => {
   try {
-    const { uid, title, body, imageUrl } = req.body;
+    const { uid, title, body, imageUrl, route, scheduledTime } = req.body;
     
     if (!uid || !title || !body) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -695,6 +722,7 @@ app.post("/api/send-promotion", async (req, res) => {
 
     console.log(`\n======================================================`);
     console.log(`👉 [Admin] User ${uid} requesting to send promotion: ${title}`);
+    if (scheduledTime) console.log(`👉 [Admin] Scheduled for: ${scheduledTime}`);
 
     // Verify Admin Status
     const userDoc = await db.collection("users").doc(uid).get();
@@ -703,12 +731,13 @@ app.post("/api/send-promotion", async (req, res) => {
       return res.status(403).json({ error: "Access denied. Admin role required." });
     }
 
-    // Construct FCM Message
+    // Construct FCM Message Payload
     const message = {
       notification: {
         title: title,
         body: body,
       },
+      data: { route: route || 'home' },
       topic: "all_users",
     };
 
@@ -716,17 +745,60 @@ app.post("/api/send-promotion", async (req, res) => {
       message.notification.imageUrl = imageUrl;
     }
 
-    // Send Message
-    const response = await admin.messaging().send(message);
-    
-    console.log(`✅ [Admin] Successfully sent promotional message! Message ID:`, response);
-    res.status(200).json({ success: true, messageId: response });
+    // Handle Scheduling vs Immediate
+    if (scheduledTime) {
+      // Save to Firestore
+      const docRef = await db.collection("scheduled_promotions").add({
+        messagePayload: message,
+        scheduledTime: new Date(scheduledTime),
+        createdBy: uid,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        sent: false,
+      });
+      console.log(`✅ [Admin] Promotion scheduled! Doc ID: ${docRef.id}`);
+      return res.status(200).json({ success: true, messageId: docRef.id, scheduled: true });
+    } else {
+      // Send Message Immediately
+      const response = await admin.messaging().send(message);
+      console.log(`✅ [Admin] Successfully sent promotional message! Message ID:`, response);
+      return res.status(200).json({ success: true, messageId: response, scheduled: false });
+    }
 
   } catch (error) {
-    console.error("❌ [Admin] Failed to send promotional message:", error);
+    console.error("❌ [Admin] Failed to process promotional message:", error);
     res.status(500).json({ error: error.message });
   }
 });
+
+// ─── Scheduled Promotion CRON Task ───────────────────────────────
+setInterval(async () => {
+  if (!firebaseReady) return;
+  try {
+    const now = admin.firestore.Timestamp.now();
+    const snapshot = await db.collection("scheduled_promotions")
+      .where("sent", "==", false)
+      .where("scheduledTime", "<=", now)
+      .get();
+
+    if (snapshot.empty) return;
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      console.log(`[Cron] Sending scheduled promotion: ${doc.id}`);
+      try {
+        await admin.messaging().send(data.messagePayload);
+        await doc.ref.update({ sent: true, sentAt: admin.firestore.FieldValue.serverTimestamp() });
+        console.log(`✅ [Cron] Scheduled promotion ${doc.id} sent successfully!`);
+      } catch (err) {
+        console.error(`❌ [Cron] Error sending scheduled promotion ${doc.id}:`, err);
+        // Mark as failed so it doesn't loop forever
+        await doc.ref.update({ sent: true, error: err.message });
+      }
+    }
+  } catch (err) {
+    console.error("[Cron] Error checking scheduled promotions:", err);
+  }
+}, 60000); // Check every 60 seconds
 
 // ─── Keep-Alive Self Ping ──────────────────────────────────────────
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "";
