@@ -680,6 +680,54 @@ app.post("/api/razorpay-webhook", async (req, res) => {
   }
 });
 
+// ─── Admin Promotional Messaging ───────────────────────────────────
+app.post("/api/send-promotion", async (req, res) => {
+  try {
+    const { uid, title, body, imageUrl } = req.body;
+    
+    if (!uid || !title || !body) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    if (!firebaseReady) {
+      return res.status(503).json({ error: "Firebase not initialized" });
+    }
+
+    console.log(`\n======================================================`);
+    console.log(`👉 [Admin] User ${uid} requesting to send promotion: ${title}`);
+
+    // Verify Admin Status
+    const userDoc = await db.collection("users").doc(uid).get();
+    if (!userDoc.exists || userDoc.data().role !== "admin") {
+      console.warn(`⚠️ [Admin] User ${uid} is NOT an admin. Access denied.`);
+      return res.status(403).json({ error: "Access denied. Admin role required." });
+    }
+
+    // Construct FCM Message
+    const message = {
+      notification: {
+        title: title,
+        body: body,
+      },
+      topic: "all_users",
+    };
+
+    if (imageUrl && imageUrl.trim() !== '') {
+      message.notification.imageUrl = imageUrl;
+    }
+
+    // Send Message
+    const response = await admin.messaging().send(message);
+    
+    console.log(`✅ [Admin] Successfully sent promotional message! Message ID:`, response);
+    res.status(200).json({ success: true, messageId: response });
+
+  } catch (error) {
+    console.error("❌ [Admin] Failed to send promotional message:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── Keep-Alive Self Ping ──────────────────────────────────────────
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || "";
 if (RENDER_URL) {
