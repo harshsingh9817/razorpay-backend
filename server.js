@@ -108,8 +108,21 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// ─── Basic Auth Middleware ──────────────────────────────────────────
+const basicAuth = (req, res, next) => {
+  const b64auth = (req.headers.authorization || '').split(' ')[1] || '';
+  const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
+
+  if (login && login === 'admin' && password && password === 'r@siINDHA8#') {
+    return next();
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="401"');
+  res.status(401).send('Authentication required. Please enter the admin credentials.');
+};
+
 // ─── Logs Dashboard (Web Page) ──────────────────────────────────────
-app.get("/logs", (req, res) => {
+app.get("/logs", basicAuth, (req, res) => {
   let html = `
     <!DOCTYPE html>
     <html>
@@ -163,7 +176,7 @@ app.get("/logs", (req, res) => {
 });
 
 // ─── Status Dashboard (Web Page) ───────────────────────────────────
-app.get("/", (req, res) => {
+app.get("/", basicAuth, (req, res) => {
   const uptime = process.uptime();
   const hours = Math.floor(uptime / 3600);
   const minutes = Math.floor((uptime % 3600) / 60);
